@@ -41,21 +41,29 @@ def bilinear_grid_sample(input: Tensor, grid: Tensor) -> Tensor:
     
     out_list = []
     for b in range(B):
-        input_b = input[b]
-        x0_b = x0[b]
-        x1_b = x1[b]
-        y0_b = y0[b]
-        y1_b = y1[b]
+        input_b = input[b].reshape(C, H * W)
+        x0_b = x0[b].reshape(-1)
+        x1_b = x1[b].reshape(-1)
+        y0_b = y0[b].reshape(-1)
+        y1_b = y1[b].reshape(-1)
+
+        idx00 = y0_b * W + x0_b
+        idx01 = y0_b * W + x1_b
+        idx10 = y1_b * W + x0_b
+        idx11 = y1_b * W + x1_b
+        idx = idx00.cat(idx01).cat(idx10).cat(idx11).reshape(-1)
+
+        gathered = input_b[:, idx].reshape(C, 4, Hg, Wg)
+        v00 = gathered[:, 0]
+        v01 = gathered[:, 1]
+        v10 = gathered[:, 2]
+        v11 = gathered[:, 3]
+
         wx0_b = wx0[b]
         wx1_b = wx1[b]
         wy0_b = wy0[b]
         wy1_b = wy1[b]
-        
-        v00 = input_b[:, y0_b, x0_b]
-        v01 = input_b[:, y0_b, x1_b]
-        v10 = input_b[:, y1_b, x0_b]
-        v11 = input_b[:, y1_b, x1_b]
-        
+
         out_b = v00 * wx0_b * wy0_b + v01 * wx1_b * wy0_b + v10 * wx0_b * wy1_b + v11 * wx1_b * wy1_b
         out_list.append(out_b.unsqueeze(0))
     
@@ -200,27 +208,37 @@ class Model:
     def device(self):
         pass
 
-    def _raw_inference(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0) -> Tensor:
-        B, C, H, W = img0.shape
-        
-        # Pad to multiple of 32
-        ph = ((H - 1) // 32 + 1) * 32
-        pw = ((W - 1) // 32 + 1) * 32
-        pad_h = ph - H
-        pad_w = pw - W
-        
-        if pad_h > 0 or pad_w > 0:
-            img0 = img0.pad((0, pad_w, 0, pad_h), mode='constant', value=0)
-            img1 = img1.pad((0, pad_w, 0, pad_h), mode='constant', value=0)
-        
+    def _forward(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0) -> Tensor:
         imgs = img0.cat(img1, dim=1)
         scale_list = [int(16/scale), int(8/scale), int(4/scale), int(2/scale), int(1/scale)]
         _, _, merged = self.flownet(imgs, timestep, scale_list)
-        
+        return merged
+
+    def _jit_forward(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0) -> Tensor:
+        B, C, H, W = img0.shape
+
+        # Pad to multiple of 64 -> constant shape + exact scale-16 block divisions
+        # (RIFE needs H/W divisible by 64: //16 then two stride-2 convs must divide exactly)
+        ph = ((H - 1) // 64 + 1) * 64
+        pw = ((W - 1) // 64 + 1) * 64
+        pad_h = ph - H
+        pad_w = pw - W
+
+        if pad_h > 0 or pad_w > 0:
+            img0 = img0.pad((0, pad_w, 0, pad_h), mode='constant', value=0)
+            img1 = img1.pad((0, pad_w, 0, pad_h), mode='constant', value=0)
+
+        jit_key = (ph, pw, float(scale), float(timestep))
+        if jit_key not in self._jit_cache:
+            self._jit_cache[jit_key] = TinyJit(
+                lambda t0, t1: self._forward(t0, t1, timestep=timestep, scale=scale)
+            )
+        merged = self._jit_cache[jit_key](img0, img1)
+
         # Remove padding
         if pad_h > 0 or pad_w > 0:
             merged = merged[:, :, :H, :W]
-        
+
         return merged
     
     def tile_process(
@@ -261,13 +279,6 @@ class Model:
             mode="reflect",
         )
 
-        jit_key = (tile, scale, float(timestep))
-        if jit_key not in self._jit_cache:
-            self._jit_cache[jit_key] = TinyJit(
-                lambda t0, t1: self._raw_inference(t0, t1, timestep=timestep, scale=scale)
-            )
-        jit_infer = self._jit_cache[jit_key]
-
         for ty in range(tiles_y):
             for tx in range(tiles_x):
                 sx = tx * base
@@ -278,7 +289,7 @@ class Model:
                 tile0_t = Tensor(tile0_np)
                 tile1_t = Tensor(tile1_np)
 
-                y_tile = jit_infer(tile0_t, tile1_t).numpy()
+                y_tile = self._jit_forward(tile0_t, tile1_t, timestep=timestep, scale=scale).numpy()
 
                 in_x = tx * base
                 in_y = ty * base
@@ -305,7 +316,7 @@ class Model:
     ) -> Tensor:
         if tile > 0:
             return self.tile_process(img0, img1, timestep=timestep, scale=scale, tile=tile, tile_pad=tile_pad)
-        return self._raw_inference(img0, img1, timestep=timestep, scale=scale)
+        return self._jit_forward(img0, img1, timestep=timestep, scale=scale)
 
 
 def load_torch_weights(tinygrad_model, torch_weights_path):

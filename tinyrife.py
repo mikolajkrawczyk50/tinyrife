@@ -115,17 +115,19 @@ def main():
             print(f'Found {len(input_files)} frames, will produce {len(input_files) * 2 - 1} output frames')
 
         out_idx = 0
-        for idx in range(len(input_files)):
-            save_image(load_image(input_files[idx]), os.path.join(args.output, f'{out_idx:08d}.png'))
+        prev = load_image(input_files[0])
+        save_image(prev, os.path.join(args.output, f'{out_idx:08d}.png'))
+        out_idx += 1
+        for idx in range(1, len(input_files)):
+            cur = load_image(input_files[idx])
+            if args.verbose:
+                print(f'  [{idx}/{len(input_files)-1}] {os.path.basename(input_files[idx-1])} + {os.path.basename(input_files[idx])}')
+            out = model.inference(prev, cur, timestep=0.5, tile=args.tile, tile_pad=args.tile_pad)
+            save_image(out, os.path.join(args.output, f'{out_idx:08d}.png'))
             out_idx += 1
-            if idx < len(input_files) - 1:
-                if args.verbose:
-                    print(f'  [{idx+1}/{len(input_files)-1}] {os.path.basename(input_files[idx])} + {os.path.basename(input_files[idx+1])}')
-                img0 = load_image(input_files[idx])
-                img1 = load_image(input_files[idx + 1])
-                out = model.inference(img0, img1, timestep=0.5, tile=args.tile, tile_pad=args.tile_pad)
-                save_image(out, os.path.join(args.output, f'{out_idx:08d}.png'))
-                out_idx += 1
+            save_image(cur, os.path.join(args.output, f'{out_idx:08d}.png'))
+            out_idx += 1
+            prev = cur
 
         if args.verbose:
             print(f'Done. Output in {args.output}')
