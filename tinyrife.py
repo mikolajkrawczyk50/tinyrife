@@ -101,7 +101,7 @@ def main():
         if args.verbose:
             print('Running inference...')
         t0 = time.time()
-        out = model.inference(img0, img1, timestep=0.5, tile=args.tile, tile_pad=args.tile_pad)
+        out = model.inference(img0, img1, timestep=0.5, tile=args.tile, tile_pad=args.tile_pad, verbose=args.verbose)
         if args.verbose:
             print(f'Inference took {time.time() - t0:.2f}s')
 
@@ -127,7 +127,7 @@ def main():
             cur = load_image(input_files[idx])
             if args.verbose:
                 print(f'  [{idx}/{len(input_files)-1}] {os.path.basename(input_files[idx-1])} + {os.path.basename(input_files[idx])}')
-            out = model.inference(prev, cur, timestep=0.5, tile=args.tile, tile_pad=args.tile_pad)
+            out = model.inference(prev, cur, timestep=0.5, tile=args.tile, tile_pad=args.tile_pad, verbose=args.verbose)
             save_image(out, os.path.join(args.output, f'{out_idx:08d}.png'))
             out_idx += 1
             save_image(cur, os.path.join(args.output, f'{out_idx:08d}.png'))

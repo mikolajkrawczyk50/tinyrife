@@ -1,4 +1,5 @@
 import math
+import time
 from tinygrad import Tensor, TinyJit
 from tinygrad.nn import Conv2d, ConvTranspose2d
 import numpy as np
@@ -248,6 +249,7 @@ class Model:
         scale: float = 1.0,
         tile: int = 128,
         tile_pad: int = 10,
+        verbose: bool = False,
     ) -> Tensor:
         """Tiled inference with constant model input shape (1, 3, tile, tile) for TinyJit."""
         base = tile - 2 * tile_pad
@@ -278,8 +280,11 @@ class Model:
             mode="reflect",
         )
 
+        n_tiles = tiles_x * tiles_y
+        tile_times = np.zeros(n_tiles, dtype=np.float64) if verbose else None
         for ty in range(tiles_y):
             for tx in range(tiles_x):
+                t_start = time.perf_counter()
                 sx = tx * base
                 sy = ty * base
                 tile0_np = img0_padded[:, :, sy : sy + tile, sx : sx + tile]
@@ -289,6 +294,10 @@ class Model:
                 tile1_t = Tensor(tile1_np)
 
                 y_tile = self._jit_forward(tile0_t, tile1_t, timestep=timestep, scale=scale).numpy()
+
+                if verbose:
+                    tile_times[ty * tiles_x + tx] = time.perf_counter() - t_start
+                    print(f"    tile {ty * tiles_x + tx + 1}/{n_tiles} (x={tx}, y={ty}): {tile_times[ty * tiles_x + tx]:.3f}s")
 
                 in_x = tx * base
                 in_y = ty * base
@@ -302,6 +311,11 @@ class Model:
                     y_tile[:, :, oy_t : oy_t + h_valid, ox_t : ox_t + w_valid]
                 )
 
+        if verbose:
+            print(f"  Tiles: {n_tiles} total, avg {tile_times.mean()*1000:.1f}ms, "
+                  f"min {tile_times.min()*1000:.1f}ms, max {tile_times.max()*1000:.1f}ms, "
+                  f"total {tile_times.sum():.3f}s")
+
         return Tensor(out)
 
     def inference(
@@ -312,9 +326,10 @@ class Model:
         scale: float = 1.0,
         tile: int = 0,
         tile_pad: int = 10,
+        verbose: bool = False,
     ) -> Tensor:
         if tile > 0:
-            return self.tile_process(img0, img1, timestep=timestep, scale=scale, tile=tile, tile_pad=tile_pad)
+            return self.tile_process(img0, img1, timestep=timestep, scale=scale, tile=tile, tile_pad=tile_pad, verbose=verbose)
         return self._jit_forward(img0, img1, timestep=timestep, scale=scale)
 
 
