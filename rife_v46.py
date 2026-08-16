@@ -1,6 +1,5 @@
 import math
-import tinygrad
-from tinygrad import Tensor, nn, TinyJit
+from tinygrad import Tensor, TinyJit
 from tinygrad.nn import Conv2d, ConvTranspose2d
 import numpy as np
 
@@ -319,28 +318,30 @@ class Model:
         return self._jit_forward(img0, img1, timestep=timestep, scale=scale)
 
 
-def load_torch_weights(tinygrad_model, torch_weights_path):
-    import torch
-    from tinygrad import Tensor
+def load_safetensors_weights(tinygrad_model, safetensors_path):
+    from safetensors import safe_open
 
-    weights = torch.load(torch_weights_path, map_location='cpu')
+    weights = {}
+    with safe_open(safetensors_path, framework="numpy") as f:
+        for k in f.keys():
+            weights[k] = f.get_tensor(k)
 
-    def assign_conv2d(tg_conv, th_weight, th_bias=None):
-        tg_conv.weight.assign(Tensor(th_weight.numpy()))
-        if th_bias is not None:
-            tg_conv.bias.assign(Tensor(th_bias.numpy()))
+    def assign_conv2d(tg_conv, np_weight, np_bias=None):
+        tg_conv.weight.assign(Tensor(np_weight))
+        if np_bias is not None:
+            tg_conv.bias.assign(Tensor(np_bias))
 
-    def assign_convtranspose2d(tg_conv, th_weight, th_bias=None):
-        tg_conv.weight.assign(Tensor(th_weight.numpy()))
-        if th_bias is not None:
-            tg_conv.bias.assign(Tensor(th_bias.numpy()))
+    def assign_convtranspose2d(tg_conv, np_weight, np_bias=None):
+        tg_conv.weight.assign(Tensor(np_weight))
+        if np_bias is not None:
+            tg_conv.bias.assign(Tensor(np_bias))
 
     def load_block(tg_block, prefix, c):
         assign_conv2d(tg_block.conv0[0], weights[f'{prefix}.conv0.0.0.weight'], weights[f'{prefix}.conv0.0.0.bias'])
         assign_conv2d(tg_block.conv0[2], weights[f'{prefix}.conv0.1.0.weight'], weights[f'{prefix}.conv0.1.0.bias'])
 
         for i in range(8):
-            beta = weights[f'{prefix}.convblock.{i}.beta'].numpy().squeeze()
+            beta = weights[f'{prefix}.convblock.{i}.beta'].squeeze()
             tg_block.convblock[i].beta.assign(Tensor(beta.reshape(1, c, 1, 1)))
             assign_conv2d(tg_block.convblock[i].conv, weights[f'{prefix}.convblock.{i}.conv.weight'], weights[f'{prefix}.convblock.{i}.conv.bias'])
 

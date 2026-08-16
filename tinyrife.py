@@ -12,17 +12,22 @@ import glob
 import cv2
 import numpy as np
 from tinygrad import Tensor, TinyJit
-import torch
 
-from rife_v46 import Model, load_torch_weights
+from rife_v46 import Model, load_safetensors_weights
 
 
 def resolve_model_path(path):
     if os.path.isdir(path):
+        st = os.path.join(path, 'flownet.safetensors')
+        if os.path.exists(st):
+            return st
+        npz = os.path.join(path, 'flownet.npz')
+        if os.path.exists(npz):
+            return npz
         pkl = os.path.join(path, 'flownet.pkl')
         if os.path.exists(pkl):
             return pkl
-        raise FileNotFoundError(f'flownet.pkl not found in {path}')
+        raise FileNotFoundError(f'flownet.safetensors, flownet.npz or flownet.pkl not found in {path}')
     return path
 
 
@@ -79,7 +84,7 @@ def main():
 
     start_time = time.time()
     model = Model()
-    load_torch_weights(model, resolve_model_path(args.model))
+    load_safetensors_weights(model, resolve_model_path(args.model))
     model.eval()
 
     if args.verbose:
