@@ -69,3 +69,4 @@ python test_rife.py
 - Input: RGB images, normalized to [0,1], shape (B,3,H,W)
 - Output: Interpolated frame at timestep (default 0.5)
 - Tiling uses TinyJit for constant-shape kernel compilation
+- FP16 is pointless here (measured ~20% slower): tinygrad CL fp16 = plain fp16 arithmetic with no pack4/8 vectorization (unlike ncnn), and tiled runs are host-roundtrip-bound anyway. Perf lever is reducing tile host roundtrips, not precision.
