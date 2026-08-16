@@ -148,7 +148,7 @@ class IFNet:
         self.block4 = IFBlock(28, c=32)
         self.encode = Head()
         
-    def __call__(self, x: Tensor, timestep=0.5, scale_list=[8, 4, 2, 1]):
+    def __call__(self, x: Tensor, timestep=0.5, scale_list=[8, 4, 2, 1], start=0, end=5, warm=None, return_state=False):
         channel = x.shape[1] // 2
         img0 = x[:, :channel]
         img1 = x[:, channel:]
@@ -163,15 +163,19 @@ class IFNet:
         
         flow_list = []
         mask_list = []
-        warped_img0 = img0
-        warped_img1 = img1
-        flow = None
-        mask = None
-        feat = None
+        
+        if warm is not None:
+            flow, mask, feat, warped_img0, warped_img1 = warm
+        else:
+            warped_img0 = img0
+            warped_img1 = img1
+            flow = None
+            mask = None
+            feat = None
         
         blocks = [self.block0, self.block1, self.block2, self.block3, self.block4]
         
-        for i in range(5):
+        for i in range(start, end):
             if flow is None:
                 inp = img0[:, :3].cat(img1[:, :3], dim=1).cat(f0, dim=1).cat(f1, dim=1).cat(timestep, dim=1)
                 flow, mask, feat = blocks[i](inp, None, scale=scale_list[i])
@@ -186,6 +190,9 @@ class IFNet:
             flow_list.append(flow)
             warped_img0 = warp(img0, flow[:, :2])
             warped_img1 = warp(img1, flow[:, 2:4])
+        
+        if return_state:
+            return flow_list, mask, (flow, mask, feat, warped_img0, warped_img1)
         
         mask = mask.sigmoid()
         merged = warped_img0 * mask + warped_img1 * (1 - mask)
@@ -214,6 +221,25 @@ class Model:
         _, _, merged = self.flownet(imgs, timestep, scale_list)
         return merged
 
+    def _forward_coarse(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0):
+        imgs = img0.cat(img1, dim=1)
+        scale_list = [int(16/scale), int(8/scale), int(4/scale), int(2/scale), int(1/scale)]
+        _, _, state = self.flownet(imgs, timestep, scale_list, start=0, end=2, return_state=True)
+        return state
+
+    def _forward_fine(self, img0: Tensor, img1: Tensor, state: Tensor,
+                      timestep: float = 0.5, scale: float = 1.0) -> Tensor:
+        imgs = img0.cat(img1, dim=1)
+        scale_list = [int(16/scale), int(8/scale), int(4/scale), int(2/scale), int(1/scale)]
+        flow = state[:, 0:4]
+        mask = state[:, 4:5]
+        feat = state[:, 5:13]
+        warped0 = state[:, 13:16]
+        warped1 = state[:, 16:19]
+        warm = (flow, mask, feat, warped0, warped1)
+        _, _, merged = self.flownet(imgs, timestep, scale_list, start=2, end=5, warm=warm)
+        return merged
+
     def _jit_forward(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0) -> Tensor:
         B, C, H, W = img0.shape
 
@@ -240,7 +266,56 @@ class Model:
             merged = merged[:, :, :H, :W]
 
         return merged
-    
+
+    def _jit_coarse(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0):
+        B, C, H, W = img0.shape
+        ph = ((H - 1) // 64 + 1) * 64
+        pw = ((W - 1) // 64 + 1) * 64
+        pad_h = ph - H
+        pad_w = pw - W
+
+        if pad_h > 0 or pad_w > 0:
+            img0 = img0.pad((0, pad_w, 0, pad_h), mode='constant', value=0)
+            img1 = img1.pad((0, pad_w, 0, pad_h), mode='constant', value=0)
+
+        jit_key = (ph, pw, float(scale), float(timestep), 'coarse')
+        if jit_key not in self._jit_cache:
+            self._jit_cache[jit_key] = TinyJit(
+                lambda t0, t1: self._forward_coarse(t0, t1, timestep=timestep, scale=scale)
+            )
+        state = self._jit_cache[jit_key](img0, img1)
+
+        if pad_h > 0 or pad_w > 0:
+            state = tuple(s[:, :, :H, :W] for s in state)
+
+        return state
+
+    def _jit_fine(self, img0: Tensor, img1: Tensor, state: Tensor,
+                  timestep: float = 0.5, scale: float = 1.0) -> Tensor:
+        B, C, H, W = img0.shape
+        ph = ((H - 1) // 64 + 1) * 64
+        pw = ((W - 1) // 64 + 1) * 64
+        pad_h = ph - H
+        pad_w = pw - W
+
+        if pad_h > 0 or pad_w > 0:
+            img0 = img0.pad((0, pad_w, 0, pad_h), mode='constant', value=0)
+            img1 = img1.pad((0, pad_w, 0, pad_h), mode='constant', value=0)
+            state = state.pad((0, pad_w, 0, pad_h), mode='constant', value=0)
+
+        jit_key = (ph, pw, float(scale), float(timestep), 'fine')
+        if jit_key not in self._jit_cache:
+            self._jit_cache[jit_key] = TinyJit(
+                lambda t0, t1, st: self._forward_fine(
+                    t0, t1, st, timestep=timestep, scale=scale)
+            )
+        merged = self._jit_cache[jit_key](img0, img1, state)
+
+        if pad_h > 0 or pad_w > 0:
+            merged = merged[:, :, :H, :W]
+
+        return merged
+
     def tile_process(
         self,
         img0: Tensor,
@@ -251,12 +326,16 @@ class Model:
         tile_pad: int = 10,
         verbose: bool = False,
     ) -> Tensor:
-        """Tiled inference with constant model input shape (1, 3, tile, tile) for TinyJit."""
+        """Hybrid tiled inference.
+
+        Coarse blocks (0, 1) run on the whole image so the coarse flow field is
+        globally consistent; only fine blocks (2, 3, 4) run per tile. This removes
+        tile-boundary seams: their receptive fields fit inside tile_pad.
+        """
         base = tile - 2 * tile_pad
         assert base > 0, f"tile size ({tile}) must be greater than 2 * tile_pad ({2 * tile_pad})"
 
         B, C, height, width = img0.shape
-        out = np.zeros((B, C, height, width), dtype=np.float32)
 
         tiles_x = math.ceil(width / base)
         tiles_y = math.ceil(height / base)
@@ -269,6 +348,8 @@ class Model:
         img0_np = img0.numpy()
         img1_np = img1.numpy()
 
+        # reflect-pad whole image on host so every tile window is interior ->
+        # zero host<->device roundtrips inside the tile loop
         img0_padded = np.pad(
             img0_np,
             ((0, 0), (0, 0), (pad_top, max(0, pad_bottom)), (pad_left, max(0, pad_right))),
@@ -280,6 +361,20 @@ class Model:
             mode="reflect",
         )
 
+        img0_t = Tensor(img0_padded)
+        img1_t = Tensor(img1_padded)
+
+        # global coarse pass on the padded image -> seam-free coarse flow, and the
+        # state tensors already carry the reflect context edge tiles need
+        state = self._jit_coarse(img0_t, img1_t, timestep=timestep, scale=scale)
+        state_all = Tensor.cat(*state, dim=1)
+
+        out = np.zeros((B, C, height, width), dtype=np.float32)
+
+        # NOTE: accumulate in numpy, not Tensor slice .assign() — assign on a
+        # sliced view writes a temp buffer, leaving the parent stale and
+        # producing seams at tile boundaries.
+
         n_tiles = tiles_x * tiles_y
         tile_times = np.zeros(n_tiles, dtype=np.float64) if verbose else None
         for ty in range(tiles_y):
@@ -287,13 +382,13 @@ class Model:
                 t_start = time.perf_counter()
                 sx = tx * base
                 sy = ty * base
-                tile0_np = img0_padded[:, :, sy : sy + tile, sx : sx + tile]
-                tile1_np = img1_padded[:, :, sy : sy + tile, sx : sx + tile]
 
-                tile0_t = Tensor(tile0_np)
-                tile1_t = Tensor(tile1_np)
+                tile0_t = img0_t[:, :, sy : sy + tile, sx : sx + tile].clone()
+                tile1_t = img1_t[:, :, sy : sy + tile, sx : sx + tile].clone()
+                state_t = state_all[:, :, sy : sy + tile, sx : sx + tile].clone()
 
-                y_tile = self._jit_forward(tile0_t, tile1_t, timestep=timestep, scale=scale).numpy()
+                y_tile = self._jit_fine(tile0_t, tile1_t, state_t,
+                                        timestep=timestep, scale=scale).numpy()
 
                 if verbose:
                     tile_times[ty * tiles_x + tx] = time.perf_counter() - t_start
@@ -312,6 +407,7 @@ class Model:
                 )
 
         if verbose:
+            tile_times = np.array(tile_times)
             print(f"  Tiles: {n_tiles} total, avg {tile_times.mean()*1000:.1f}ms, "
                   f"min {tile_times.min()*1000:.1f}ms, max {tile_times.max()*1000:.1f}ms, "
                   f"total {tile_times.sum():.3f}s")
