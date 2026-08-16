@@ -65,7 +65,7 @@ def main():
     parser.add_argument('-o', dest='output', required=True, help='Output image path (pair mode) or directory (dir mode)')
     parser.add_argument('-m', dest='model', default='models/rife-v4.6', help='Model path (directory or file, default: models/rife-v4.6)')
     parser.add_argument('--tile', type=int, default=0, help='tile size for processing, 0 disables tiling (default: 0)')
-    parser.add_argument('--tile_pad', type=int, default=10, help='pad around each tile (default: 10)')
+    parser.add_argument('--tile_pad', type=int, default=32, help='pad around each tile (default: 32)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     args = parser.parse_args()
 
