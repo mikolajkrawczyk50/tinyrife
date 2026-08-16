@@ -68,5 +68,6 @@ python test_rife.py
 - Model: RIFE v4.6 (IFNet with 5 IFBlocks at scales 8,4,2,1 + 1)
 - Input: RGB images, normalized to [0,1], shape (B,3,H,W)
 - Output: Interpolated frame at timestep (default 0.5)
-- Tiling uses TinyJit for constant-shape kernel compilation
+- Tiling is hybrid: coarse IFBlocks (0,1) run on whole image (globally consistent flow), fine blocks (2,3,4) per tile — this kills tile-boundary seams. Uses TinyJit for constant-shape kernel compilation
+- Most efficient tile_pad = tile/8 (56% useful compute); tile ≥ 4×tile_pad. Min quality pad = 32, quality margin = 64 (covers block2 RF ~68px)
 - FP16 is pointless here (measured ~20% slower): tinygrad CL fp16 = plain fp16 arithmetic with no pack4/8 vectorization (unlike ncnn), and tiled runs are host-roundtrip-bound anyway. Perf lever is reducing tile host roundtrips, not precision.
