@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 from tinygrad import Tensor, TinyJit
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from rife_v46 import Model, load_safetensors_weights, load_torch_weights
 
 
