@@ -14,7 +14,7 @@ import numpy as np
 from tinygrad import Tensor, TinyJit
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-from rife_v46 import Model, load_safetensors_weights, load_torch_weights
+from rife_v46 import Model, load_safetensors_weights
 
 
 def resolve_model_path(path):
@@ -22,13 +22,7 @@ def resolve_model_path(path):
         st = os.path.join(path, 'flownet.safetensors')
         if os.path.exists(st):
             return st
-        npz = os.path.join(path, 'flownet.npz')
-        if os.path.exists(npz):
-            return npz
-        pkl = os.path.join(path, 'flownet.pkl')
-        if os.path.exists(pkl):
-            return pkl
-        raise FileNotFoundError(f'flownet.safetensors, flownet.npz or flownet.pkl not found in {path}')
+        raise FileNotFoundError(f'flownet.safetensors not found in {path}')
     return path
 
 
@@ -94,12 +88,7 @@ def main():
     start_time = time.time()
     model = Model()
     model_path = resolve_model_path(args.model)
-    if model_path.endswith('.safetensors'):
-        load_safetensors_weights(model, model_path)
-    elif model_path.endswith('.pkl'):
-        load_torch_weights(model, model_path)
-    else:
-        load_safetensors_weights(model, model_path)
+    load_safetensors_weights(model, model_path)
     model.eval()
 
     if args.verbose:
