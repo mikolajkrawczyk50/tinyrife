@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 from tinygrad import Tensor, TinyJit
 
-from rife_v46 import Model, load_safetensors_weights
+from rife_v46 import Model, load_safetensors_weights, load_torch_weights
 
 
 def resolve_model_path(path):
@@ -65,8 +65,10 @@ def main():
     parser.add_argument('-o', dest='output', required=True, help='Output image path (pair mode) or directory (dir mode)')
     parser.add_argument('-m', dest='model', default='models/rife-v4.6', help='Model path (directory or file, default: models/rife-v4.6)')
     parser.add_argument('--tile', type=int, default=0, help='tile size for processing, 0 disables tiling (default: 0)')
-    parser.add_argument('--tile_pad', type=int, default=32, help='pad around each tile (default: 32)')
+    parser.add_argument('--tile_pad', type=int, default=0, help='pad around each tile (default: tile/8)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('-x', '--tta', action='store_true', help='Enable spatial TTA mode (8 augmentations)')
+    parser.add_argument('-z', '--tta_temporal', action='store_true', help='Enable temporal TTA mode (forward + reverse)')
     args = parser.parse_args()
 
     has_pair = args.img0 is not None and args.img1 is not None
@@ -80,11 +82,23 @@ def main():
     if args.verbose:
         print(f'Loading model from {args.model}...')
         if args.tile > 0:
+            if args.tile_pad == 0:
+                args.tile_pad = args.tile // 8
             print(f'Tiling enabled: tile={args.tile}, tile_pad={args.tile_pad}, base={args.tile - 2 * args.tile_pad}')
+        if args.tta:
+            print('TTA mode: spatial (8 augmentations)')
+        if args.tta_temporal:
+            print('TTA mode: temporal (forward + reverse)')
 
     start_time = time.time()
     model = Model()
-    load_safetensors_weights(model, resolve_model_path(args.model))
+    model_path = resolve_model_path(args.model)
+    if model_path.endswith('.safetensors'):
+        load_safetensors_weights(model, model_path)
+    elif model_path.endswith('.pkl'):
+        load_torch_weights(model, model_path)
+    else:
+        load_safetensors_weights(model, model_path)
     model.eval()
 
     if args.verbose:
@@ -101,7 +115,7 @@ def main():
         if args.verbose:
             print('Running inference...')
         t0 = time.time()
-        out = model.inference(img0, img1, timestep=0.5, tile=args.tile, tile_pad=args.tile_pad, verbose=args.verbose)
+        out = model.inference(img0, img1, timestep=0.5, tile=args.tile, tile_pad=args.tile_pad, verbose=args.verbose, tta=args.tta, tta_temporal=args.tta_temporal)
         if args.verbose:
             print(f'Inference took {time.time() - t0:.2f}s')
 
@@ -127,7 +141,7 @@ def main():
             cur = load_image(input_files[idx])
             if args.verbose:
                 print(f'  [{idx}/{len(input_files)-1}] {os.path.basename(input_files[idx-1])} + {os.path.basename(input_files[idx])}')
-            out = model.inference(prev, cur, timestep=0.5, tile=args.tile, tile_pad=args.tile_pad, verbose=args.verbose)
+            out = model.inference(prev, cur, timestep=0.5, tile=args.tile, tile_pad=args.tile_pad, verbose=args.verbose, tta=args.tta, tta_temporal=args.tta_temporal)
             save_image(out, os.path.join(args.output, f'{out_idx:08d}.png'))
             out_idx += 1
             save_image(cur, os.path.join(args.output, f'{out_idx:08d}.png'))

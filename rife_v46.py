@@ -70,6 +70,148 @@ def bilinear_grid_sample(input: Tensor, grid: Tensor) -> Tensor:
     return Tensor.cat(*out_list, dim=0)
 
 
+def _tta_augment_img(x: Tensor, idx: int) -> Tensor:
+    """Apply one of 8 TTA augmentations to an image [B, C, H, W] (rife-ncnn-vulkan matching).
+    0: original
+    1: flip H
+    2: flip H + flip V
+    3: flip V
+    4: transpose (swap H, W)
+    5: transpose + flip H
+    6: transpose + flip H + flip V
+    7: transpose + flip V
+    """
+    if idx == 0:
+        return x
+    elif idx == 1:
+        return x.flip(3)
+    elif idx == 2:
+        return x.flip(2).flip(3)
+    elif idx == 3:
+        return x.flip(2)
+    elif idx == 4:
+        return x.permute(0, 1, 3, 2)
+    elif idx == 5:
+        return x.permute(0, 1, 3, 2).flip(3)
+    elif idx == 6:
+        return x.permute(0, 1, 3, 2).flip(2).flip(3)
+    elif idx == 7:
+        return x.permute(0, 1, 3, 2).flip(2)
+    return x
+
+
+# Alias for backward compatibility
+_tta_augment = _tta_augment_img
+
+
+def _tta_deaugment_img(img: Tensor, idx: int) -> Tensor:
+    """Reverse one of 8 TTA augmentations on image tensor."""
+    if idx == 0:
+        return img
+    elif idx == 1:
+        return img.flip(3)
+    elif idx == 2:
+        return img.flip(2).flip(3)
+    elif idx == 3:
+        return img.flip(2)
+    elif idx == 4:
+        return img.permute(0, 1, 3, 2)
+    elif idx == 5:
+        return img.flip(3).permute(0, 1, 3, 2)
+    elif idx == 6:
+        return img.flip(2).flip(3).permute(0, 1, 3, 2)
+    elif idx == 7:
+        return img.flip(2).permute(0, 1, 3, 2)
+    return img
+
+
+def _tta_deaugment_flow_mask(flow_mask: Tensor, idx: int) -> Tensor:
+    """De-augment 5-channel flow+mask tensor [flow0_x, flow0_y, flow1_x, flow1_y, mask] to canonical coordinates."""
+    if idx == 0:
+        return flow_mask
+    elif idx == 1:  # flip H: x negated, y unchanged
+        f = flow_mask.flip(3)
+        return Tensor.cat(-f[:, 0:1], f[:, 1:2], -f[:, 2:3], f[:, 3:4], f[:, 4:5], dim=1)
+    elif idx == 2:  # flip H + flip V: x negated, y negated
+        f = flow_mask.flip(2).flip(3)
+        return Tensor.cat(-f[:, 0:1], -f[:, 1:2], -f[:, 2:3], -f[:, 3:4], f[:, 4:5], dim=1)
+    elif idx == 3:  # flip V: x unchanged, y negated
+        f = flow_mask.flip(2)
+        return Tensor.cat(f[:, 0:1], -f[:, 1:2], f[:, 2:3], -f[:, 3:4], f[:, 4:5], dim=1)
+    elif idx == 4:  # transpose: swap x and y channels
+        return flow_mask.permute(0, 1, 3, 2)[:, [1, 0, 3, 2, 4], :, :]
+    elif idx == 5:  # transpose + flip H
+        f = flow_mask.flip(3).permute(0, 1, 3, 2)
+        return Tensor.cat(f[:, 1:2], -f[:, 0:1], f[:, 3:4], -f[:, 2:3], f[:, 4:5], dim=1)
+    elif idx == 6:  # transpose + flip H + flip V
+        f = flow_mask.flip(2).flip(3).permute(0, 1, 3, 2)
+        return Tensor.cat(-f[:, 1:2], -f[:, 0:1], -f[:, 3:4], -f[:, 2:3], f[:, 4:5], dim=1)
+    elif idx == 7:  # transpose + flip V
+        f = flow_mask.flip(2).permute(0, 1, 3, 2)
+        return Tensor.cat(-f[:, 1:2], f[:, 0:1], -f[:, 3:4], f[:, 2:3], f[:, 4:5], dim=1)
+    return flow_mask
+
+
+def _tta_augment_flow_mask(flow_mask: Tensor, idx: int) -> Tensor:
+    """Augment canonical 5-channel flow+mask tensor to branch coordinates."""
+    if idx == 0:
+        return flow_mask
+    elif idx == 1:
+        f = flow_mask.flip(3)
+        return Tensor.cat(-f[:, 0:1], f[:, 1:2], -f[:, 2:3], f[:, 3:4], f[:, 4:5], dim=1)
+    elif idx == 2:
+        f = flow_mask.flip(2).flip(3)
+        return Tensor.cat(-f[:, 0:1], -f[:, 1:2], -f[:, 2:3], -f[:, 3:4], f[:, 4:5], dim=1)
+    elif idx == 3:
+        f = flow_mask.flip(2)
+        return Tensor.cat(f[:, 0:1], -f[:, 1:2], f[:, 2:3], -f[:, 3:4], f[:, 4:5], dim=1)
+    elif idx == 4:
+        return flow_mask.permute(0, 1, 3, 2)[:, [1, 0, 3, 2, 4], :, :]
+    elif idx == 5:
+        f = flow_mask.permute(0, 1, 3, 2)
+        return Tensor.cat(-f[:, 1:2], f[:, 0:1], -f[:, 3:4], f[:, 2:3], f[:, 4:5], dim=1).flip(3)
+    elif idx == 6:
+        f = flow_mask.permute(0, 1, 3, 2)
+        return Tensor.cat(-f[:, 1:2], -f[:, 0:1], -f[:, 3:4], -f[:, 2:3], f[:, 4:5], dim=1).flip(2).flip(3)
+    elif idx == 7:
+        f = flow_mask.permute(0, 1, 3, 2)
+        return Tensor.cat(f[:, 1:2], -f[:, 0:1], f[:, 3:4], -f[:, 2:3], f[:, 4:5], dim=1).flip(2)
+    return flow_mask
+
+
+def _realized_average(tensor_list: list) -> Tensor:
+    """Average a list of tensors using pairwise realized reduction to stay well within compute shader storage block limits (e.g. ModernGL max 16)."""
+    n = len(tensor_list)
+    if n == 1:
+        return tensor_list[0]
+    cur = [t.realize() for t in tensor_list]
+    while len(cur) > 1:
+        next_level = []
+        for i in range(0, len(cur), 2):
+            if i + 1 < len(cur):
+                next_level.append((cur[i] + cur[i + 1]).realize())
+            else:
+                next_level.append(cur[i])
+        cur = next_level
+    return (cur[0] * (1.0 / n)).realize()
+
+
+def _temporal_average_flow_mask(fm_fwd: Tensor, fm_rev: Tensor):
+    """Temporal average forward and reverse flow+mask.
+    Forward flow:  [flow0_x, flow0_y, flow1_x, flow1_y, mask]
+    Reverse flow:  [rev0_x, rev0_y, rev1_x, rev1_y, rev_mask]
+    """
+    avg_f0_x = (fm_fwd[:, 0:1] + fm_rev[:, 2:3]) * 0.5
+    avg_f0_y = (fm_fwd[:, 1:2] + fm_rev[:, 3:4]) * 0.5
+    avg_f1_x = (fm_fwd[:, 2:3] + fm_rev[:, 0:1]) * 0.5
+    avg_f1_y = (fm_fwd[:, 3:4] + fm_rev[:, 1:2]) * 0.5
+    avg_mask = (fm_fwd[:, 4:5] - fm_rev[:, 4:5]) * 0.5
+
+    fwd_merged = Tensor.cat(avg_f0_x, avg_f0_y, avg_f1_x, avg_f1_y, avg_mask, dim=1)
+    rev_merged = Tensor.cat(avg_f1_x, avg_f1_y, avg_f0_x, avg_f0_y, -avg_mask, dim=1)
+    return fwd_merged, rev_merged
+
+
 class Head:
     def __init__(self):
         self.cnn0 = Conv2d(3, 16, 3, 2, 1)
@@ -219,6 +361,25 @@ class Model:
         imgs = img0.cat(img1, dim=1)
         scale_list = [int(16/scale), int(8/scale), int(4/scale), int(2/scale), int(1/scale)]
         _, _, merged = self.flownet(imgs, timestep, scale_list)
+        return merged
+
+    def _forward_nojit(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0) -> Tensor:
+        """Forward pass without JIT cache - for TTA where inputs have different shapes/graphs."""
+        B, C, H, W = img0.shape
+        ph = ((H - 1) // 64 + 1) * 64
+        pw = ((W - 1) // 64 + 1) * 64
+        pad_h = ph - H
+        pad_w = pw - W
+
+        if pad_h > 0 or pad_w > 0:
+            img0 = img0.pad((0, pad_w, 0, pad_h), mode='reflect')
+            img1 = img1.pad((0, pad_w, 0, pad_h), mode='reflect')
+
+        merged = self._forward(img0, img1, timestep=timestep, scale=scale)
+
+        if pad_h > 0 or pad_w > 0:
+            merged = merged[:, :, :H, :W]
+
         return merged
 
     def _forward_coarse(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0):
@@ -414,6 +575,159 @@ class Model:
 
         return Tensor(out)
 
+    def _forward_tta(
+        self,
+        img0: Tensor,
+        img1: Tensor,
+        timestep: float = 0.5,
+        scale: float = 1.0,
+        spatial: bool = False,
+        temporal: bool = False,
+        verbose: bool = False,
+    ) -> Tensor:
+        """TTA implementation matching rife-ncnn-vulkan:
+        - Spatial TTA (8 augmentations) with intermediate flow/mask averaging across blocks
+        - Temporal TTA (forward + reverse) with intermediate flow/mask merging across blocks
+        """
+        B, C, H, W = img0.shape
+
+        # Pre-pad to 64-multiple so all augmentations produce valid dims
+        # and model never sees zero-padded borders
+        ph = ((H - 1) // 64 + 1) * 64
+        pw = ((W - 1) // 64 + 1) * 64
+        pad_h = ph - H
+        pad_w = pw - W
+
+        if pad_h > 0 or pad_w > 0:
+            img0 = img0.pad((0, pad_w, 0, pad_h), mode='reflect')
+            img1 = img1.pad((0, pad_w, 0, pad_h), mode='reflect')
+
+        num_spatial = 8 if spatial else 1
+        scale_list = [int(16 / scale), int(8 / scale), int(4 / scale), int(2 / scale), int(1 / scale)]
+        blocks = [self.flownet.block0, self.flownet.block1, self.flownet.block2, self.flownet.block3, self.flownet.block4]
+
+        # Prepare augmentations
+        aug_img0 = [_tta_augment_img(img0, ti).realize() for ti in range(num_spatial)]
+        aug_img1 = [_tta_augment_img(img1, ti).realize() for ti in range(num_spatial)]
+
+        # Prepare timesteps
+        aug_timestep = [
+            Tensor([timestep]).view(1, 1, 1, 1).expand(B, 1, aug_img0[ti].shape[2], aug_img0[ti].shape[3]).realize()
+            for ti in range(num_spatial)
+        ]
+        if temporal:
+            aug_timestep_rev = [
+                Tensor([1.0 - timestep]).view(1, 1, 1, 1).expand(B, 1, aug_img0[ti].shape[2], aug_img0[ti].shape[3]).realize()
+                for ti in range(num_spatial)
+            ]
+
+        # Pre-encode features for heads
+        aug_f0 = [self.flownet.encode(aug_img0[ti][:, :3]).realize() for ti in range(num_spatial)]
+        aug_f1 = [self.flownet.encode(aug_img1[ti][:, :3]).realize() for ti in range(num_spatial)]
+
+        flow = [None] * num_spatial
+        mask = [None] * num_spatial
+        feat = [None] * num_spatial
+
+        if temporal:
+            rev_flow = [None] * num_spatial
+            rev_mask = [None] * num_spatial
+            rev_feat = [None] * num_spatial
+
+        # Run 5 blocks
+        for i in range(5):
+            if verbose:
+                print(f"  TTA block {i + 1}/5")
+
+            # Execute block i for each spatial augmentation
+            for ti in range(num_spatial):
+                if i == 0:
+                    inp = aug_img0[ti][:, :3].cat(aug_img1[ti][:, :3], dim=1).cat(aug_f0[ti], dim=1).cat(aug_f1[ti], dim=1).cat(aug_timestep[ti], dim=1)
+                    f, m, ft = blocks[0](inp, None, scale=scale_list[0])
+                    flow[ti], mask[ti], feat[ti] = f.realize(), m.realize(), ft.realize()
+
+                    if temporal:
+                        rev_inp = aug_img1[ti][:, :3].cat(aug_img0[ti][:, :3], dim=1).cat(aug_f1[ti], dim=1).cat(aug_f0[ti], dim=1).cat(aug_timestep_rev[ti], dim=1)
+                        rf, rm, rft = blocks[0](rev_inp, None, scale=scale_list[0])
+                        rev_flow[ti], rev_mask[ti], rev_feat[ti] = rf.realize(), rm.realize(), rft.realize()
+                else:
+                    wf0 = warp(aug_f0[ti], flow[ti][:, :2])
+                    wf1 = warp(aug_f1[ti], flow[ti][:, 2:4])
+                    warped_img0 = warp(aug_img0[ti], flow[ti][:, :2])
+                    warped_img1 = warp(aug_img1[ti], flow[ti][:, 2:4])
+                    inp = warped_img0[:, :3].cat(warped_img1[:, :3], dim=1).cat(wf0, dim=1).cat(wf1, dim=1).cat(aug_timestep[ti], dim=1).cat(mask[ti], dim=1).cat(feat[ti], dim=1)
+                    fd, m, ft = blocks[i](inp, flow[ti], scale=scale_list[i])
+                    flow[ti] = (flow[ti] + fd).realize()
+                    mask[ti] = m.realize()
+                    feat[ti] = ft.realize()
+
+                    if temporal:
+                        rev_wf0 = warp(aug_f1[ti], rev_flow[ti][:, :2])
+                        rev_wf1 = warp(aug_f0[ti], rev_flow[ti][:, 2:4])
+                        rev_warped_img0 = warp(aug_img1[ti], rev_flow[ti][:, :2])
+                        rev_warped_img1 = warp(aug_img0[ti], rev_flow[ti][:, 2:4])
+                        rev_inp = rev_warped_img0[:, :3].cat(rev_warped_img1[:, :3], dim=1).cat(rev_wf0, dim=1).cat(rev_wf1, dim=1).cat(aug_timestep_rev[ti], dim=1).cat(rev_mask[ti], dim=1).cat(rev_feat[ti], dim=1)
+                        rfd, rm, rft = blocks[i](rev_inp, rev_flow[ti], scale=scale_list[i])
+                        rev_flow[ti] = (rev_flow[ti] + rfd).realize()
+                        rev_mask[ti] = rm.realize()
+                        rev_feat[ti] = rft.realize()
+
+            # For intermediate blocks (0, 1, 2, 3): average flow and mask
+            if i < 4:
+                # 1. Temporal averaging
+                if temporal:
+                    for ti in range(num_spatial):
+                        fm_fwd = flow[ti].cat(mask[ti], dim=1)
+                        fm_rev = rev_flow[ti].cat(rev_mask[ti], dim=1)
+                        fwd_merged, rev_merged = _temporal_average_flow_mask(fm_fwd, fm_rev)
+                        flow[ti] = fwd_merged[:, :4].realize()
+                        mask[ti] = fwd_merged[:, 4:5].realize()
+                        rev_flow[ti] = rev_merged[:, :4].realize()
+                        rev_mask[ti] = rev_merged[:, 4:5].realize()
+
+                # 2. Spatial averaging across 8 augmentations
+                if spatial:
+                    fm_fwd_list = [_tta_deaugment_flow_mask(flow[ti].cat(mask[ti], dim=1).realize(), ti).realize() for ti in range(8)]
+                    fm_fwd_avg = _realized_average(fm_fwd_list)
+                    for ti in range(8):
+                        fm_aug = _tta_augment_flow_mask(fm_fwd_avg, ti).realize()
+                        flow[ti] = fm_aug[:, :4].realize()
+                        mask[ti] = fm_aug[:, 4:5].realize()
+
+                    if temporal:
+                        fm_rev_list = [_tta_deaugment_flow_mask(rev_flow[ti].cat(rev_mask[ti], dim=1).realize(), ti).realize() for ti in range(8)]
+                        fm_rev_avg = _realized_average(fm_rev_list)
+                        for ti in range(8):
+                            fm_rev_aug = _tta_augment_flow_mask(fm_rev_avg, ti).realize()
+                            rev_flow[ti] = fm_rev_aug[:, :4].realize()
+                            rev_mask[ti] = fm_rev_aug[:, 4:5].realize()
+
+        # After block 4 (final flow & merge):
+        out_imgs = []
+        for ti in range(num_spatial):
+            warped_img0 = warp(aug_img0[ti], flow[ti][:, :2])
+            warped_img1 = warp(aug_img1[ti], flow[ti][:, 2:4])
+            m_sig = mask[ti].sigmoid()
+            out_ti = (warped_img0 * m_sig + warped_img1 * (1.0 - m_sig)).realize()
+
+            if temporal:
+                rev_warped_img0 = warp(aug_img1[ti], rev_flow[ti][:, :2])
+                rev_warped_img1 = warp(aug_img0[ti], rev_flow[ti][:, 2:4])
+                rev_m_sig = rev_mask[ti].sigmoid()
+                out_rev_ti = rev_warped_img0 * rev_m_sig + rev_warped_img1 * (1.0 - rev_m_sig)
+                out_ti = ((out_ti + out_rev_ti) * 0.5).realize()
+
+            out_imgs.append(out_ti)
+
+        if spatial:
+            deaug_outs = [_tta_deaugment_img(out_imgs[ti], ti).realize() for ti in range(8)]
+            merged_avg = _realized_average(deaug_outs)
+        else:
+            merged_avg = out_imgs[0]
+
+        # Crop back to original size
+        return merged_avg[:, :, :H, :W].realize()
+
     def inference(
         self,
         img0: Tensor,
@@ -423,7 +737,11 @@ class Model:
         tile: int = 0,
         tile_pad: int = 10,
         verbose: bool = False,
+        tta: bool = False,
+        tta_temporal: bool = False,
     ) -> Tensor:
+        if tta or tta_temporal:
+            return self._forward_tta(img0, img1, timestep=timestep, scale=scale, spatial=tta, temporal=tta_temporal, verbose=verbose)
         if tile > 0:
             return self.tile_process(img0, img1, timestep=timestep, scale=scale, tile=tile, tile_pad=tile_pad, verbose=verbose)
         return self._jit_forward(img0, img1, timestep=timestep, scale=scale)
@@ -470,4 +788,49 @@ def load_safetensors_weights(tinygrad_model, safetensors_path):
     assign_conv2d(tg_encode.cnn2, weights['module.encode.cnn2.weight'], weights['module.encode.cnn2.bias'])
     assign_convtranspose2d(tg_encode.cnn3, weights['module.encode.cnn3.weight'], weights['module.encode.cnn3.bias'])
 
-    print("Weights loaded successfully!")
+print("Weights loaded successfully!")
+
+
+def load_torch_weights(tinygrad_model, pkl_path):
+    import torch
+
+    weights = torch.load(pkl_path, map_location='cpu', weights_only=False)
+    if 'model' in weights:
+        weights = weights['model']
+
+    weights = {k: v.numpy() for k, v in weights.items()}
+
+    def assign_conv2d(tg_conv, np_weight, np_bias=None):
+        tg_conv.weight.assign(Tensor(np_weight))
+        if np_bias is not None:
+            tg_conv.bias.assign(Tensor(np_bias))
+
+    def assign_convtranspose2d(tg_conv, np_weight, np_bias=None):
+        tg_conv.weight.assign(Tensor(np_weight))
+        if np_bias is not None:
+            tg_conv.bias.assign(Tensor(np_bias))
+
+    def load_block(tg_block, prefix, c):
+        assign_conv2d(tg_block.conv0[0], weights[f'{prefix}.conv0.0.0.weight'], weights[f'{prefix}.conv0.0.0.bias'])
+        assign_conv2d(tg_block.conv0[2], weights[f'{prefix}.conv0.1.0.weight'], weights[f'{prefix}.conv0.1.0.bias'])
+
+        for i in range(8):
+            beta = weights[f'{prefix}.convblock.{i}.beta'].squeeze()
+            tg_block.convblock[i].beta.assign(Tensor(beta.reshape(1, c, 1, 1)))
+            assign_conv2d(tg_block.convblock[i].conv, weights[f'{prefix}.convblock.{i}.conv.weight'], weights[f'{prefix}.convblock.{i}.conv.bias'])
+
+        assign_convtranspose2d(tg_block.lastconv[0], weights[f'{prefix}.lastconv.0.weight'], weights[f'{prefix}.lastconv.0.bias'])
+
+    load_block(tinygrad_model.flownet.block0, 'module.block0', 192)
+    load_block(tinygrad_model.flownet.block1, 'module.block1', 128)
+    load_block(tinygrad_model.flownet.block2, 'module.block2', 96)
+    load_block(tinygrad_model.flownet.block3, 'module.block3', 64)
+    load_block(tinygrad_model.flownet.block4, 'module.block4', 32)
+
+    tg_encode = tinygrad_model.flownet.encode
+    assign_conv2d(tg_encode.cnn0, weights['module.encode.cnn0.weight'], weights['module.encode.cnn0.bias'])
+    assign_conv2d(tg_encode.cnn1, weights['module.encode.cnn1.weight'], weights['module.encode.cnn1.bias'])
+    assign_conv2d(tg_encode.cnn2, weights['module.encode.cnn2.weight'], weights['module.encode.cnn2.bias'])
+    assign_convtranspose2d(tg_encode.cnn3, weights['module.encode.cnn3.weight'], weights['module.encode.cnn3.bias'])
+
+    print("PyTorch weights loaded successfully!")
