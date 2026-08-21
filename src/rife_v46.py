@@ -788,6 +788,6 @@ def load_safetensors_weights(tinygrad_model, safetensors_path):
     assign_conv2d(tg_encode.cnn2, weights['module.encode.cnn2.weight'], weights['module.encode.cnn2.bias'])
     assign_convtranspose2d(tg_encode.cnn3, weights['module.encode.cnn3.weight'], weights['module.encode.cnn3.bias'])
 
-print("Weights loaded successfully!")
+    print("Weights loaded successfully!")
 
 

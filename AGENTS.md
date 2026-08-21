@@ -4,13 +4,23 @@
 
 ```
 tinyrife/
-├── rife_v46.py          # Core model implementation (Head, ResConv, IFBlock, IFNet, Model, warp, bilinear_grid_sample, load_torch_weights)
+├── src/
+│   └── rife_v46.py      # Core model implementation (Head, ResConv, IFBlock, IFNet, Model, warp, bilinear_grid_sample, load_safetensors_weights)
 ├── tinyrife.py          # Main CLI entry point (pair mode, dir mode, verbose, timing)
-├── test_rife.py         # Smoke test for rife_v46.Model
+├── tests/
+│   └── test_rife.py     # Smoke test for rife_v46.Model
 ├── models/
-│   └── rife-v4.6/       # PyTorch weights (flownet.pkl)
+│   └── rife-v4.6.safetensors # Safetensors weights
 └── demo/                # Demo/test data (input frames, outputs)
 ```
+
+## Environment & Hardware
+
+Prefer running with OpenCL on Radeon via RustiCL:
+```bash
+DEV=CL RUSTICL_ENABLE=radeonsi
+```
+(e.g., `DEV=CL RUSTICL_ENABLE=radeonsi python tinyrife.py ...`)
 
 ## Entry Point
 
@@ -18,49 +28,48 @@ tinyrife/
 
 ```bash
 # Pair mode (single interpolation)
-python tinyrife.py -0 img0.png -1 img1.png -o output.png -m models/rife-v4.6
+DEV=CL RUSTICL_ENABLE=radeonsi python tinyrife.py -0 img0.png -1 img1.png -o output.png -m models/rife-v4.6.safetensors
 
 # Directory mode (sequence interpolation)
-python tinyrife.py -i input_frames/ -o output_frames/ -m models/rife-v4.6
+DEV=CL RUSTICL_ENABLE=radeonsi python tinyrife.py -i input_frames/ -o output_frames/ -m models/rife-v4.6.safetensors
 
 # With tiling for large images
-python tinyrife.py -0 a.png -1 b.png -o out.png --tile 128 --tile_pad 10
+DEV=CL RUSTICL_ENABLE=radeonsi python tinyrife.py -0 a.png -1 b.png -o out.png --tile 128 --tile_pad 10
 ```
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `rife_v46.py` | Single source of truth for model + weight loader |
-| `tinyrife.py` | CLI only — imports `Model`, `load_torch_weights` from `rife_v46` |
-| `test_rife.py` | Verifies model loads + forward pass |
+| `src/rife_v46.py` | Single source of truth for model + weight loader |
+| `tinyrife.py` | CLI only — imports `Model`, `load_safetensors_weights` from `rife_v46` |
+| `tests/test_rife.py` | Verifies model loads + forward pass |
 
 ## Dependencies
 
 - `tinygrad` (inference engine)
-- `torch` (weight loading only)
+- `safetensors` (weight loading)
 - `opencv-python` (image I/O)
 - `numpy`
 
 ## Weight Loading
 
-`load_torch_weights(model, path)` in `rife_v46.py` loads PyTorch `flownet.pkl` into tinygrad `Model`. Called by both `tinyrife.py` and `test_rife.py`.
+`load_safetensors_weights(model, path)` in `src/rife_v46.py` loads `flownet.safetensors` or `rife-v4.6.safetensors` into tinygrad `Model`. Called by `tinyrife.py`.
 
 ## Demo Data
 
 Test frames and outputs stored under `demo/`:
-- `demo/inputs/` — 302 frame sequence
-- `demo/outputs/` — 52 interpolated frames
-- `demo/test_input*/` `demo/test_output*/` — small test sets
+- Demo test frames (`demo/i0.png`, `demo/i1.png`, etc.)
+- Test outputs and heatmaps (`demo/out_*.png`)
 
 ## Commands
 
 ```bash
 # Run CLI
-python tinyrife.py -h
+DEV=CL RUSTICL_ENABLE=radeonsi python tinyrife.py -h
 
 # Run smoke test
-python test_rife.py
+DEV=CL RUSTICL_ENABLE=radeonsi python tests/test_rife.py
 ```
 
 ## Notes

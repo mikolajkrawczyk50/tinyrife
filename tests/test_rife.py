@@ -1,6 +1,10 @@
 import os
 import sys
 
+# Prevent tinygrad from crashing if CPU env var is set to non-numeric string (e.g. CPU=x86_64)
+if os.environ.get('CPU') not in (None, '0', '1'):
+    os.environ.pop('CPU', None)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from rife_v46 import Model
 

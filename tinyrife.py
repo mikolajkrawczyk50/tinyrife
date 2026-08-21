@@ -11,6 +11,11 @@ import time
 import glob
 import cv2
 import numpy as np
+
+# Prevent tinygrad from crashing if CPU env var is set to non-numeric string (e.g. CPU=x86_64)
+if os.environ.get('CPU') not in (None, '0', '1'):
+    os.environ.pop('CPU', None)
+
 from tinygrad import Tensor, TinyJit
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -19,10 +24,13 @@ from rife_v46 import Model, load_safetensors_weights
 
 def resolve_model_path(path):
     if os.path.isdir(path):
-        st = os.path.join(path, 'flownet.safetensors')
-        if os.path.exists(st):
-            return st
-        raise FileNotFoundError(f'flownet.safetensors not found in {path}')
+        for name in ('flownet.safetensors', 'rife-v4.6.safetensors'):
+            st = os.path.join(path, name)
+            if os.path.exists(st):
+                return st
+        raise FileNotFoundError(f'safetensors weights not found in {path}')
+    if not os.path.exists(path) and os.path.exists(f'{path}.safetensors'):
+        return f'{path}.safetensors'
     return path
 
 
@@ -58,7 +66,7 @@ def main():
     parser.add_argument('-1', dest='img1', help='Input image 1 path')
     parser.add_argument('-i', dest='input_dir', help='Input image directory')
     parser.add_argument('-o', dest='output', required=True, help='Output image path (pair mode) or directory (dir mode)')
-    parser.add_argument('-m', dest='model', default='models/rife-v4.6', help='Model path (directory or file, default: models/rife-v4.6)')
+    parser.add_argument('-m', dest='model', default='models/rife-v4.6.safetensors', help='Model path (directory or file, default: models/rife-v4.6.safetensors)')
     parser.add_argument('--tile', type=int, default=0, help='tile size for processing, 0 disables tiling (default: 0)')
     parser.add_argument('--tile_pad', type=int, default=0, help='pad around each tile (default: tile/8)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
