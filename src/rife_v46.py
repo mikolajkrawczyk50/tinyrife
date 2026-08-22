@@ -1,12 +1,18 @@
 import math
+import os
 import time
+
+# Prevent tinygrad from crashing if CPU env var is set to non-numeric string (e.g. CPU=x86_64)
+if os.environ.get('CPU') not in (None, '0', '1'):
+    os.environ.pop('CPU', None)
+
+import numpy as np
 from tinygrad import Tensor, TinyJit
 from tinygrad.nn import Conv2d, ConvTranspose2d
-import numpy as np
 
 
 def warp(tenInput: Tensor, tenFlow: Tensor) -> Tensor:
-    B, C, H, W = tenInput.shape
+    B, _, H, W = tenInput.shape
     
     tenHorizontal = Tensor.linspace(-1.0, 1.0, W).view(1, 1, 1, W).expand(B, -1, H, -1)
     tenVertical = Tensor.linspace(-1.0, 1.0, H).view(1, 1, H, 1).expand(B, -1, -1, W)
@@ -24,15 +30,13 @@ def bilinear_grid_sample(input: Tensor, grid: Tensor) -> Tensor:
     B, C, H, W = input.shape
     _, Hg, Wg, _ = grid.shape
     
-    x = (grid[..., 0] + 1) * (W - 1) / 2
-    y = (grid[..., 1] + 1) * (H - 1) / 2
+    x = ((grid[..., 0] + 1) * (W - 1) / 2).clip(0, W - 1)
+    y = ((grid[..., 1] + 1) * (H - 1) / 2).clip(0, H - 1)
     
     x0 = x.floor().cast('int32')
     x1 = (x0 + 1).clip(0, W - 1)
     y0 = y.floor().cast('int32')
     y1 = (y0 + 1).clip(0, H - 1)
-    x0 = x0.clip(0, W - 1)
-    y0 = y0.clip(0, H - 1)
     
     wx1 = x - x0.cast('float32')
     wx0 = 1 - wx1
@@ -290,7 +294,9 @@ class IFNet:
         self.block4 = IFBlock(28, c=32)
         self.encode = Head()
         
-    def __call__(self, x: Tensor, timestep=0.5, scale_list=[8, 4, 2, 1], start=0, end=5, warm=None, return_state=False):
+    def __call__(self, x: Tensor, timestep=0.5, scale_list=None, start=0, end=5, warm=None, return_state=False):
+        if scale_list is None:
+            scale_list = [16, 8, 4, 2, 1]
         channel = x.shape[1] // 2
         img0 = x[:, :channel]
         img1 = x[:, channel:]
@@ -363,25 +369,6 @@ class Model:
         _, _, merged = self.flownet(imgs, timestep, scale_list)
         return merged
 
-    def _forward_nojit(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0) -> Tensor:
-        """Forward pass without JIT cache - for TTA where inputs have different shapes/graphs."""
-        B, C, H, W = img0.shape
-        ph = ((H - 1) // 64 + 1) * 64
-        pw = ((W - 1) // 64 + 1) * 64
-        pad_h = ph - H
-        pad_w = pw - W
-
-        if pad_h > 0 or pad_w > 0:
-            img0 = img0.pad((0, pad_w, 0, pad_h), mode='reflect')
-            img1 = img1.pad((0, pad_w, 0, pad_h), mode='reflect')
-
-        merged = self._forward(img0, img1, timestep=timestep, scale=scale)
-
-        if pad_h > 0 or pad_w > 0:
-            merged = merged[:, :, :H, :W]
-
-        return merged
-
     def _forward_coarse(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0):
         imgs = img0.cat(img1, dim=1)
         scale_list = [int(16/scale), int(8/scale), int(4/scale), int(2/scale), int(1/scale)]
@@ -402,7 +389,7 @@ class Model:
         return merged
 
     def _jit_forward(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0) -> Tensor:
-        B, C, H, W = img0.shape
+        _, _, H, W = img0.shape
 
         # Pad to multiple of 64 -> constant shape + exact scale-16 block divisions
         # (RIFE needs H/W divisible by 64: //16 then two stride-2 convs must divide exactly)
@@ -429,7 +416,7 @@ class Model:
         return merged
 
     def _jit_coarse(self, img0: Tensor, img1: Tensor, timestep: float = 0.5, scale: float = 1.0):
-        B, C, H, W = img0.shape
+        _, _, H, W = img0.shape
         ph = ((H - 1) // 64 + 1) * 64
         pw = ((W - 1) // 64 + 1) * 64
         pad_h = ph - H
@@ -453,7 +440,7 @@ class Model:
 
     def _jit_fine(self, img0: Tensor, img1: Tensor, state: Tensor,
                   timestep: float = 0.5, scale: float = 1.0) -> Tensor:
-        B, C, H, W = img0.shape
+        _, _, H, W = img0.shape
         ph = ((H - 1) // 64 + 1) * 64
         pw = ((W - 1) // 64 + 1) * 64
         pad_h = ph - H
@@ -493,6 +480,9 @@ class Model:
         globally consistent; only fine blocks (2, 3, 4) run per tile. This removes
         tile-boundary seams: their receptive fields fit inside tile_pad.
         """
+        assert tile >= 64 and tile % 64 == 0, f"tile size ({tile}) must be a multiple of 64 (e.g. 64, 128, 256, 512, 1024)"
+        if tile_pad <= 0:
+            tile_pad = max(1, tile // 8)
         base = tile - 2 * tile_pad
         assert base > 0, f"tile size ({tile}) must be greater than 2 * tile_pad ({2 * tile_pad})"
 
@@ -537,7 +527,7 @@ class Model:
         # producing seams at tile boundaries.
 
         n_tiles = tiles_x * tiles_y
-        tile_times = np.zeros(n_tiles, dtype=np.float64) if verbose else None
+        tile_times: np.ndarray | None = np.zeros(n_tiles, dtype=np.float64) if verbose else None
         for ty in range(tiles_y):
             for tx in range(tiles_x):
                 t_start = time.perf_counter()
@@ -551,7 +541,7 @@ class Model:
                 y_tile = self._jit_fine(tile0_t, tile1_t, state_t,
                                         timestep=timestep, scale=scale).numpy()
 
-                if verbose:
+                if verbose and tile_times is not None:
                     tile_times[ty * tiles_x + tx] = time.perf_counter() - t_start
                     print(f"    tile {ty * tiles_x + tx + 1}/{n_tiles} (x={tx}, y={ty}): {tile_times[ty * tiles_x + tx]:.3f}s")
 
@@ -567,8 +557,7 @@ class Model:
                     y_tile[:, :, oy_t : oy_t + h_valid, ox_t : ox_t + w_valid]
                 )
 
-        if verbose:
-            tile_times = np.array(tile_times)
+        if verbose and tile_times is not None:
             print(f"  Tiles: {n_tiles} total, avg {tile_times.mean()*1000:.1f}ms, "
                   f"min {tile_times.min()*1000:.1f}ms, max {tile_times.max()*1000:.1f}ms, "
                   f"total {tile_times.sum():.3f}s")
@@ -589,7 +578,7 @@ class Model:
         - Spatial TTA (8 augmentations) with intermediate flow/mask averaging across blocks
         - Temporal TTA (forward + reverse) with intermediate flow/mask merging across blocks
         """
-        B, C, H, W = img0.shape
+        B, _, H, W = img0.shape
 
         # Pre-pad to 64-multiple so all augmentations produce valid dims
         # and model never sees zero-padded borders
@@ -599,8 +588,9 @@ class Model:
         pad_w = pw - W
 
         if pad_h > 0 or pad_w > 0:
-            img0 = img0.pad((0, pad_w, 0, pad_h), mode='reflect')
-            img1 = img1.pad((0, pad_w, 0, pad_h), mode='reflect')
+            pad_mode = 'reflect' if (pad_h < H and pad_w < W) else 'constant'
+            img0 = img0.pad((0, pad_w, 0, pad_h), mode=pad_mode)
+            img1 = img1.pad((0, pad_w, 0, pad_h), mode=pad_mode)
 
         num_spatial = 8 if spatial else 1
         scale_list = [int(16 / scale), int(8 / scale), int(4 / scale), int(2 / scale), int(1 / scale)]
@@ -625,14 +615,14 @@ class Model:
         aug_f0 = [self.flownet.encode(aug_img0[ti][:, :3]).realize() for ti in range(num_spatial)]
         aug_f1 = [self.flownet.encode(aug_img1[ti][:, :3]).realize() for ti in range(num_spatial)]
 
-        flow = [None] * num_spatial
-        mask = [None] * num_spatial
-        feat = [None] * num_spatial
+        flow: list[Tensor] = [Tensor()] * num_spatial
+        mask: list[Tensor] = [Tensor()] * num_spatial
+        feat: list[Tensor] = [Tensor()] * num_spatial
 
         if temporal:
-            rev_flow = [None] * num_spatial
-            rev_mask = [None] * num_spatial
-            rev_feat = [None] * num_spatial
+            rev_flow: list[Tensor] = [Tensor()] * num_spatial
+            rev_mask: list[Tensor] = [Tensor()] * num_spatial
+            rev_feat: list[Tensor] = [Tensor()] * num_spatial
 
         # Run 5 blocks
         for i in range(5):
@@ -750,9 +740,12 @@ class Model:
 def load_safetensors_weights(tinygrad_model, safetensors_path):
     from safetensors import safe_open
 
+    if not os.path.exists(safetensors_path):
+        raise FileNotFoundError(f"Weights file not found: {safetensors_path}")
+
     weights = {}
     with safe_open(safetensors_path, framework="numpy") as f:
-        for k in f.keys():
+        for k in f.keys():  # noqa: SIM118
             weights[k] = f.get_tensor(k)
 
     def assign_conv2d(tg_conv, np_weight, np_bias=None):

@@ -4,11 +4,12 @@ tinyrife - RIFE v4.6 frame interpolation CLI (tinygrad)
 Mirrors basic rife-ncnn-vulkan flags: -0/-1, -i/-o, -m, -v
 """
 import argparse
-import math
+import glob
 import os
+import re
 import sys
 import time
-import glob
+
 import cv2
 import numpy as np
 
@@ -16,7 +17,7 @@ import numpy as np
 if os.environ.get('CPU') not in (None, '0', '1'):
     os.environ.pop('CPU', None)
 
-from tinygrad import Tensor, TinyJit
+from tinygrad import Tensor
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from rife_v46 import Model, load_safetensors_weights
@@ -28,14 +29,16 @@ def resolve_model_path(path):
             st = os.path.join(path, name)
             if os.path.exists(st):
                 return st
-        raise FileNotFoundError(f'safetensors weights not found in {path}')
+        raise FileNotFoundError(f'safetensors weights not found in directory: {path}')
     if not os.path.exists(path) and os.path.exists(f'{path}.safetensors'):
         return f'{path}.safetensors'
+    if not os.path.exists(path):
+        raise FileNotFoundError(f'Model weights file not found: {path}')
     return path
 
 
 def load_image(path):
-    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    img = cv2.imread(path, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError(f"Could not load image: {path}")
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -56,7 +59,8 @@ def get_image_files(dir_path):
     files = []
     for ext in exts:
         files.extend(glob.glob(os.path.join(dir_path, ext)))
-    files.sort()
+    # Natural sort to handle both zero-padded (0001.png) and unpadded (1.png) filenames
+    files.sort(key=lambda p: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', os.path.basename(p))])
     return files
 
 
@@ -67,7 +71,7 @@ def main():
     parser.add_argument('-i', dest='input_dir', help='Input image directory')
     parser.add_argument('-o', dest='output', required=True, help='Output image path (pair mode) or directory (dir mode)')
     parser.add_argument('-m', dest='model', default='models/rife-v4.6.safetensors', help='Model path (directory or file, default: models/rife-v4.6.safetensors)')
-    parser.add_argument('--tile', type=int, default=0, help='tile size for processing, 0 disables tiling (default: 0)')
+    parser.add_argument('-t', '--tile', type=int, default=128, help='tile size for processing, 0 disables tiling (default: 128)')
     parser.add_argument('--tile_pad', type=int, default=0, help='pad around each tile (default: tile/8)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     parser.add_argument('-x', '--tta', action='store_true', help='Enable spatial TTA mode (8 augmentations)')
@@ -82,11 +86,15 @@ def main():
     if has_pair and has_dir:
         parser.error('Cannot use both pair mode (-0/-1) and directory mode (-i)')
 
+    if args.tile > 0:
+        if args.tile < 64 or args.tile % 64 != 0:
+            parser.error(f'Tile size ({args.tile}) must be a multiple of 64 (e.g. 64, 128, 256, 512, 1024)')
+        if args.tile_pad == 0:
+            args.tile_pad = max(1, args.tile // 8)
+
     if args.verbose:
         print(f'Loading model from {args.model}...')
         if args.tile > 0:
-            if args.tile_pad == 0:
-                args.tile_pad = args.tile // 8
             print(f'Tiling enabled: tile={args.tile}, tile_pad={args.tile_pad}, base={args.tile - 2 * args.tile_pad}')
         if args.tta:
             print('TTA mode: spatial (8 augmentations)')

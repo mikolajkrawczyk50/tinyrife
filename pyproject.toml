@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinyrife"
+version = "0.1.0"
+description = "RIFE v4.6 frame interpolation in tinygrad"
+readme = "AGENTS.md"
+requires-python = ">=3.10"
+dependencies = [
+    "tinygrad",
+    "safetensors",
+    "opencv-python",
+    "numpy",
+]
+
+[project.scripts]
+tinyrife = "tinyrife:main"

@@ -1,5 +1,7 @@
 # tinyrife - RIFE v4.6 Frame Interpolation (tinygrad)
 
+**Minimal KISS project** — single model file, 4 deps, ~200 LOC CLI.
+
 ## Project Structure
 
 ```
@@ -34,7 +36,7 @@ DEV=CL RUSTICL_ENABLE=radeonsi python tinyrife.py -0 img0.png -1 img1.png -o out
 DEV=CL RUSTICL_ENABLE=radeonsi python tinyrife.py -i input_frames/ -o output_frames/ -m models/rife-v4.6.safetensors
 
 # With tiling for large images
-DEV=CL RUSTICL_ENABLE=radeonsi python tinyrife.py -0 a.png -1 b.png -o out.png --tile 128 --tile_pad 10
+DEV=CL RUSTICL_ENABLE=radeonsi python tinyrife.py -0 a.png -1 b.png -o out.png -t 128 --tile_pad 10
 ```
 
 ## Key Files
@@ -80,4 +82,4 @@ DEV=CL RUSTICL_ENABLE=radeonsi python tests/test_rife.py
 - Tiling is hybrid: coarse IFBlocks (0,1) run on whole image (globally consistent flow), fine blocks (2,3,4) per tile — this kills tile-boundary seams. Uses TinyJit for constant-shape kernel compilation
 - Most efficient tile_pad = tile/8 (56% useful compute); tile ≥ 4×tile_pad. Min quality pad = 32, quality margin = 64 (covers block2 RF ~68px)
 - FP16 is pointless here (measured ~20% slower): tinygrad CL fp16 = plain fp16 arithmetic with no pack4/8 vectorization (unlike ncnn), and tiled runs are host-roundtrip-bound anyway. Perf lever is reducing tile host roundtrips, not precision.
-- **Avoid non-standard dims (1080p, 720p, etc)**: RIFE needs H/W divisible by 64 (for scale-16 + stride-2 convs). Non-multiples of 128 (e.g. 1080, 720) trigger JIT recompilation per frame and can hang GPU. Use `--tile 128` to force 64-divisible padding, or resize to 128/256/512/1024 multiples.
+- **Avoid non-standard dims (1080p, 720p, etc)**: RIFE needs H/W divisible by 64 (for scale-16 + stride-2 convs). Non-multiples of 128 (e.g. 1080, 720) trigger JIT recompilation per frame and can hang GPU. Use `-t 128` to force 64-divisible padding, or resize to 128/256/512/1024 multiples.
