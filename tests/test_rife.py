@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from tinygrad import Tensor
 
-from rife_v46 import IFNet, Model, load_safetensors_weights
+from rife_v46 import IFNet, Model, load_safetensors_weights, warp
 from tinyrife import get_image_files, load_image, resolve_model_path, save_image
 
 
@@ -129,6 +129,45 @@ class TestRife(unittest.TestCase):
         out = self.model.inference(img0_small, img1_small, timestep=0.5, tta=True)
         self.assertEqual(out.shape, (1, 3, 32, 32))
         self.assertFalse(np.isnan(out.numpy()).any())
+
+    def test_09_warp_identity(self):
+        """Test that zero optical flow warp preserves the input image identically."""
+        img = Tensor.rand(1, 3, 32, 32)
+        zero_flow = Tensor.zeros(1, 4, 32, 32)
+        warped0 = warp(img, zero_flow[:, :2])
+        warped1 = warp(img, zero_flow[:, 2:4])
+        np.testing.assert_allclose(warped0.numpy(), img.numpy(), atol=1e-5)
+        np.testing.assert_allclose(warped1.numpy(), img.numpy(), atol=1e-5)
+
+    def test_10_directory_sequence_flow(self):
+        """Test sequential directory processing workflow."""
+        with tempfile.TemporaryDirectory() as input_dir, tempfile.TemporaryDirectory() as output_dir:
+            # Create 3 test frames
+            for i in range(3):
+                t = Tensor.rand(1, 3, 64, 64)
+                save_image(t, os.path.join(input_dir, f"frame_{i:04d}.png"))
+
+            input_files = get_image_files(input_dir)
+            self.assertEqual(len(input_files), 3)
+
+            out_idx = 0
+            prev = load_image(input_files[0])
+            save_image(prev, os.path.join(output_dir, f"{out_idx:08d}.png"))
+            out_idx += 1
+            for idx in range(1, len(input_files)):
+                cur = load_image(input_files[idx])
+                out = self.model.inference(prev, cur, timestep=0.5, tile=64, tile_pad=8)
+                save_image(out, os.path.join(output_dir, f"{out_idx:08d}.png"))
+                out_idx += 1
+                save_image(cur, os.path.join(output_dir, f"{out_idx:08d}.png"))
+                out_idx += 1
+                prev = cur
+
+            out_files = get_image_files(output_dir)
+            # 3 input frames -> 2*3 - 1 = 5 output frames
+            self.assertEqual(len(out_files), 5)
+            self.assertEqual(os.path.basename(out_files[0]), "00000000.png")
+            self.assertEqual(os.path.basename(out_files[4]), "00000004.png")
 
 
 if __name__ == '__main__':
